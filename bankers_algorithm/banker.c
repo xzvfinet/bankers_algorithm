@@ -1,219 +1,277 @@
 #include <stdio.h>
-#include <string.h>
-#include <libxml/parser.h>
+#include <stdlib.h>
 
 typedef enum { false, true } bool;
 
-void printTotalRes(int resourceSize, int* totalRes);
-void printAvailRes(int resourceSize, int* availRes);
-void printProcessState(int resourceSize, int process, int** allocMat, int** maxMat);
-void printAvailProcess(int processSize, int resourceSize, int* processed, int* availRes, int** allocMat, int** maxMat);
+// Print releated functions
+void printStep(FILE *f, int step);
+void printTotalResources(FILE *f);
+void printAvailableResources(FILE *f);
+void printProcessState(FILE *f, int process);
+void printProcessOrder(FILE *f);
+void printAllocateAndRelease(FILE *f, int process);
+void printAvailableProcesses(FILE* f, int num, int* processes);
+void printDeadlock(FILE* f);
+
+// Algorithm related functions
+int getAvailableProcesses(int* out);
+void allocateAndRelease(int process);
+bool isAvailable(int process);
+
+// Variables
+int processSize, resourceSize;
+int *totalResources, *availResources, *availProcesses, **allocMat, **maxMat;
+bool *processed;
+int *order;
+int i, j;
+int p, r;
+int orderIndex = 0;
 
 int main(int argc, char **argv)
 {
-	/************************************************************************/
-	/* XML INPUT SETUP                                                      */
-	/************************************************************************/
-	xmlDoc         *document;
-	xmlNode        *root, *node, *process, *resource;
-	char           *filename;
-
-	if (argc < 2) {
-		fprintf(stderr, "Usage: %s filename.xml\n", argv[0]);
+	if (argc == 1){
+		fprintf(stderr, "You should provide config filename as program parameter\n");
+		fprintf(stderr, "ex) ./banker config.txt\n");
 		return 1;
 	}
-	xmlKeepBlanksDefault(0);
+	/************************************************************************/
+	/* FILE I/O                                                             */
+	/************************************************************************/
+	FILE *f, *fout;
+	f = fopen(argv[1], "r");
+	if (f == NULL) {
+		printf("config file doesn't exist\n");
+		return 1;
+	}
+	fout = fopen("trace.txt", "wt");
+	if (fout == NULL) {
+		printf("cannot write tract.txt\n");
+		return 1;
+	}
 
-	filename = argv[1];
-	document = xmlReadFile(filename, NULL, 0);
-	root = xmlDocGetRootElement(document);
-	fprintf(stdout, "Root is <%s> (%i)\n", root->name, root->type);
+	/************************************************************************/
+	/* DEBUG                                                                */
+	/************************************************************************/
+	FILE *stream = fout;
 
-	node = root->children;
-
-	int processSize, resourceSize;
-	// process size
-	processSize = atoi(node->children[0].content);
-	node = node->next;
-
-	// resource size
-	resourceSize = atoi(node->children[0].content);
-	node = node->next;
+	/************************************************************************/
+	/* READ SIZE OF PROCESS AND RESOURCE                                    */
+	/************************************************************************/
+	fscanf(f, "%d %d", &processSize, &resourceSize);
 
 
 	/************************************************************************/
 	/* VARIABLE SETUP                                                       */
 	/************************************************************************/
-	// Variables
-	int *totalRes, *availRes, **allocMat, **maxMat;
-	int i, j;
-	int p, r;
-
 	// Memory allocation
-	totalRes = (int*)calloc(resourceSize, sizeof(int));
-	availRes = (int*)calloc(resourceSize, sizeof(int));
+	totalResources = (int*)calloc(resourceSize, sizeof(int));
+	availResources = (int*)calloc(resourceSize, sizeof(int));
+	availProcesses = (int*)calloc(resourceSize, sizeof(int));
 	allocMat = (int**)calloc(processSize, sizeof(int*));
 	maxMat = (int**)calloc(processSize, sizeof(int*));
 	for (int i = 0; i < processSize; ++i) {
 		allocMat[i] = (int*)calloc(resourceSize, sizeof(int));
 		maxMat[i] = (int*)calloc(resourceSize, sizeof(int));
 	}
+	order = (int*)calloc(processSize, sizeof(int));
 
 	/************************************************************************/
 	/* READ DATA FROM CONFIG FILE                                           */
 	/************************************************************************/
-// total resources
-	for (i = 0, resource = node->children; resource; i++, resource = resource->next) {
-		//fprintf(stdout, "\t Total size of resource <%s> is (%s)\n", resource->name, resource->children[0].content);
-		totalRes[i] = atoi(resource->children[0].content);
+	// total resources
+	for (i = 0; i < resourceSize; i++) {
+		fscanf(f, "%d", &totalResources[i]);
 	}
-	node = node->next;
 
 	// allocation matrix
-	for (i = 0, process = node->children; process; i++, process = process->next) {
-		//fprintf(stdout, "\t Process is <%s> (%i)\n", process->name, process->type);
-		for (j = 0, resource = process->children; resource; j++, resource = resource->next) {
-			//fprintf(stdout, "\t Resource is <%s> (%s)\n", resource->name, resource->children[0].content);
-			allocMat[i][j] = atoi(resource->children[0].content);
+	for (i = 0; i < processSize; i++) {
+		for (j = 0; j < resourceSize; ++j) {
+			fscanf(f, "%d", &allocMat[i][j]);
 		}
 	}
-	node = node->next;
 
 	// maximum matrix
-	for (i = 0, process = node->children; process; i++, process = process->next) {
-		//fprintf(stdout, "\t Process is <%s> (%i)\n", process->name, process->type);
-		for (j = 0, resource = process->children; resource; j++, resource = resource->next) {
-			//fprintf(stdout, "\t Resource is <%s> (%s)\n", resource->name, resource->children[0].content);
-			maxMat[i][j] = atoi(resource->children[0].content);
+	for (i = 0; i < processSize; ++i) {
+		for (j = 0; j < resourceSize; ++j) {
+			fscanf(f, "%d", &maxMat[i][j]);
 		}
 	}
-	node = node->next;
+
+	// Initial validation on resources
+	for (r = 0; r < resourceSize; ++r) {
+		availResources[r] = totalResources[r];
+		for (p = 0; p < processSize; ++p) {
+			availResources[r] -= allocMat[p][r];
+		}
+		if (availResources[r] < 0) {
+			fprintf(stdout, "sum of initially allocated resource(R%d) exceeds the total\nneeds %d more R%d\n", r, -availResources[r], r);
+			return 1;
+		}
+	}
+
 
 	/************************************************************************/
 	/* START BANKER'S ALGORITHM                                             */
 	/************************************************************************/
 	int remains = processSize;
-	bool *processed = (bool*)calloc(processSize, sizeof(bool));
+	processed = (bool*)calloc(processSize, sizeof(bool));
 
-	// Initial available resources
-	for (r = 0; r < resourceSize; ++r) {
-		availRes[r] = totalRes[r];
-		for (p = 0; p < processSize; ++p) {
-			availRes[r] -= allocMat[p][r];
-		}
-		if (availRes[r] < 0) {
-			fprintf(stderr, "sum of initial resource(R%d) exceeds the total resources\n", r);
-		}
-	}
+	printTotalResources(stream);
 
-	// Allocate resources to processes
-	printTotalRes(resourceSize, totalRes);
 	while (remains > 0) {
-		printf("[step %d]====================================\n", processSize - remains + 1);
-		printAvailRes(resourceSize, availRes);
-		for (p = 0; p < processSize; ++p)
-			if (!processed[p]) printProcessState(resourceSize, p, allocMat, maxMat);
-		printAvailProcess(processSize, resourceSize, processed, availRes, allocMat, maxMat);
-
+		printStep(stream, processSize - remains + 1);
+		printAvailableResources(stream);
 		for (p = 0; p < processSize; ++p) {
-			if (processed[p]) continue;
-
-			bool available = true;
-			for (r = 0; r < resourceSize; ++r) {
-				int needed = maxMat[p][r] - allocMat[p][r];
-				if (needed > availRes[r]) {
-					available = false;
-					break;
-				}
-			}
-			if (available) {
-				processed[p] = true;
-				remains--;
-
-				// allocate
-				printf("\t (1) P%d is selected to be processed\n", p);
-				printf("\t (2) allocate [");
-				for (int r = 0; r < resourceSize; ++r) {
-					int needed = maxMat[p][r] - allocMat[p][r];
-					if (r != 0) printf(",");
-					printf("%d", needed);
-				}
-				printf("] to P%d\n", p);
-
-				// release
-				for (r = 0; r < resourceSize; ++r) {
-					availRes[r] += allocMat[p][r];
-				}
-				break;
-			}
-			else {
-				continue;
-			}
+			if (!processed[p]) printProcessState(stream, p);
 		}
+
+		// Get available processes
+		int availNum = getAvailableProcesses(availProcesses);
+		printAvailableProcesses(stream, availNum, availProcesses);
+
+		// If there is no available process, just break out.
+		if (availNum == 0) break;
+
+		// Allocate resources to the first process of available list
+		p = availProcesses[0];
+		printAllocateAndRelease(stream, p);
+		allocateAndRelease(p);
+
+		// Push to order list
+		order[orderIndex++] = p;
+
+		remains--;
 	}
+
+	if (remains == 0)
+		printProcessOrder(stream);
+	else
+		printDeadlock(stream);
 
 	/************************************************************************/
 	/* END                                                                  */
 	/************************************************************************/
-
-	// Return the memory
-	free(totalRes);
-	free(availRes);
+	// Release the memory
+	fclose(f);
+	fclose(fout);
+	free(totalResources);
+	free(availResources);
+	free(availProcesses);
 	for (int i = 0; i < processSize; i++) {
 		free(allocMat[i]);
 		free(maxMat[i]);
 	}
 	free(allocMat);
 	free(maxMat);
+	free(order);
 
 	return 0;
 }
 
-void printTotalRes(int resourceSize, int* totalRes) {
-	printf("Total:[");
+void printStep(FILE *f, int step) {
+	fprintf(f, "[step %d]====================================\n", step);
+}
+
+void printTotalResources(FILE *f) {
+	fprintf(f, "Total resources:[");
 	for (int i = 0; i < resourceSize - 1; ++i)
-		printf("%d,", totalRes[i]);
-	printf("%d]\n", totalRes[resourceSize - 1]);
+		fprintf(f, "%d,", totalResources[i]);
+	fprintf(f, "%d]\n", totalResources[resourceSize - 1]);
 }
 
-void printAvailRes(int resourceSize, int* availRes) {
-	printf("Available:[");
-	for (int i = 0; i < resourceSize - 1; ++i)
-		printf("%d,", availRes[i]);
-	printf("%d]\n", availRes[resourceSize - 1]);
-}
-
-void printProcessState(int resourceSize, int process, int** allocMat, int** maxMat) {
-	printf("P%d -> A:[", process);
-	for (int i = 0; i < resourceSize - 1; ++i) {
-		printf("%d,", allocMat[process][i]);
+void printAvailableResources(FILE *f) {
+	fprintf(f, "Available resources:[");
+	for (int i = 0; i < resourceSize; ++i) {
+		if (i != 0) fprintf(f, ",");
+		fprintf(f, "%d", availResources[i]);
 	}
-	printf("%d], N:[", allocMat[process][resourceSize - 1]);
-	for (int i = 0; i < resourceSize - 1; ++i) {
-		printf("%d,", maxMat[process][i]);
-	}
-	printf("%d]\n", maxMat[process][resourceSize - 1]);
+	fprintf(f, "]\n");
 }
 
-void printAvailProcess(int processSize, int resourceSize, int* processed, int* availRes, int** allocMat, int** maxMat) {
-	printf("[");
+void printProcessState(FILE *f, int process) {
+	fprintf(f, "P%d -> A:[", process);
+	for (int i = 0; i < resourceSize; ++i) {
+		if (i != 0) fprintf(f, ",");
+		fprintf(f, "%d", allocMat[process][i]);
+	}
+	fprintf(f, "], N:[");
+	for (int i = 0; i < resourceSize; ++i) {
+		if (i != 0) fprintf(f, ",");
+		fprintf(f, "%d", maxMat[process][i]);
+	}
+	fprintf(f, "]\n");
+}
+
+void printProcessOrder(FILE *f) {
+	fprintf(f, "[FINAL]=====================================\n");
+	fprintf(f, "Processing order:");
+	for (int i = 0; i < orderIndex; ++i) {
+		if (i != 0) fprintf(f, "->");
+		fprintf(f, "P%d", order[i]);
+	}
+	fprintf(f, "\n");
+}
+
+void printAllocateAndRelease(FILE *f, int process) {
+	fprintf(f, "\t (1) P%d is selected to be processed\n", process);
+	fprintf(f, "\t (2) allocate [");
+	for (int r = 0; r < resourceSize; ++r) {
+		int needed = maxMat[process][r] - allocMat[process][r];
+		if (r != 0) fprintf(f, ",");
+		fprintf(f, "%d", needed);
+	}
+	fprintf(f, "] to P%d\n", process);
+	fprintf(f, "\t (3) P%d completes its work and returns resources\n", process);
+
+}
+
+
+void printAvailableProcesses(FILE* f, int num, int* processes) {
+	fprintf(f, "[");
+	for (int i = 0; i < num; ++i) {
+		if (i != 0)
+			fprintf(f, ",");
+		fprintf(f, "P%d", processes[i]);
+	}
+	if (num != 0)
+		fprintf(f, "] can be processed \n");
+	else
+		fprintf(f, "] no process can be processed\n");
+}
+
+void printDeadlock(FILE* f) {
+	fprintf(f, "[FINAL]=====================================\n");
+	fprintf(f, "Deadlock situation.\n");
+}
+
+void allocateAndRelease(int process) {
+	processed[process] = true;
+	for (int r = 0; r < resourceSize; ++r) {
+		int needed = maxMat[process][r] - allocMat[process][r];
+		// alocate
+		availResources[r] -= needed;
+		// release
+		availResources[r] += allocMat[process][r] + needed;
+	}
+}
+
+int getAvailableProcesses(int* out) {
 	int cnt = 0;
 	for (int p = 0; p < processSize; ++p) {
 		if (processed[p]) continue;
 
-		bool available = true;
-		for (int r = 0; r < resourceSize; ++r) {
-			int needed = maxMat[p][r] - allocMat[p][r];
-			if (needed > availRes[r]) {
-				available = false;
-				break;
-			}
-		}
-		if (available) {
-			if (cnt++ != 0)
-				printf(",");
-			printf("P%d", p);
+		if (isAvailable(p))
+			out[cnt++] = p;
+	}
+	return cnt;
+}
+
+bool isAvailable(int process) {
+	for (int r = 0; r < resourceSize; ++r) {
+		int needed = maxMat[process][r] - allocMat[process][r];
+		if (needed > availResources[r]) {
+			return false;
 		}
 	}
-	printf("] can be processed \n");
+	return true;
 }
